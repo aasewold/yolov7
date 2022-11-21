@@ -2,14 +2,12 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
-import torchvision.transforms.functional as F
 import typer
 import yaml
-from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from models.experimental import attempt_load
