@@ -1,0 +1,6 @@
+train: /data/datasets/tdt17/RDD2022_YOLO/images/train
+val: /data/datasets/tdt17/RDD2022_YOLO/images/val
+test: /data/datasets/tdt17/RDD2022_YOLO/images/test
+
+nc: 4
+names: ['D00', 'D10', 'D20', 'D40']

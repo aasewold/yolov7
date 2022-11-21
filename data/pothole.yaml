@@ -1,0 +1,6 @@
+train: /data/datasets/pothole_dataset/images/train
+val: /data/datasets/pothole_dataset/images/valid
+test: /data/datasets/pothole_dataset/images/test
+
+nc: 1
+names: ['pothole']

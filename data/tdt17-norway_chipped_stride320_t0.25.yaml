@@ -1,0 +1,10 @@
+train: /data/datasets/tdt17/RDD2022_YOLO_Norway_chipped/images/train
+test: /data/datasets/tdt17/RDD2022_YOLO_Norway_chipped/images/test
+val: /data/datasets/tdt17/RDD2022_YOLO_Norway_chipped/images/val
+
+nc: 4
+names:
+- D00
+- D10
+- D20
+- D40
