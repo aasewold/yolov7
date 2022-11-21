@@ -33,7 +33,7 @@ def _get_labels(chip: tdt17.chip.Chip, labels: List[Label], image_size: Tuple[in
         if coverage >= params.label_coverage_threshold:
             intersection = intersection.offset(-chip.rect.l, -chip.rect.t)
             intersection = intersection.scale(1 / chip.rect.w, 1 / chip.rect.h)
-            chip_labels.append(Label(label.name, intersection))
+            chip_labels.append(Label(label.id, intersection))
 
     return chip_labels
 
