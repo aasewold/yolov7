@@ -11,9 +11,6 @@ class Rect:
 
     def __post_init__(self):
         assert self.l <= self.r and self.t <= self.b
-    
-    def int(self) -> 'Rect':
-        return Rect.from_ltrb(*map(round, self.ltrb))
 
     @staticmethod
     def from_ltrb(l: float, t: float, r: float, b: float) -> 'Rect':

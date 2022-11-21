@@ -30,6 +30,12 @@ class Params:
     num_workers: int
 
 
+def _format_label(label: Label) -> str:
+    id = label.id
+    l, t, r, b = map(int, label.rect.ltrb)
+    return f'{id} {l} {t} {r} {b}'
+
+
 @torch.inference_mode()
 def _eval_batch(batch: torch.Tensor, model: torch.nn.Module, params: Params) -> List[List[Prediction]]:
     pred_batch, _ = model(batch, augment=False)
@@ -45,16 +51,15 @@ def _eval_batch(batch: torch.Tensor, model: torch.nn.Module, params: Params) -> 
     return out_batch
 
 
-def _eval_images(dataset: ChippedDataset, model: torch.nn.Module, device: torch.device, result_writer: Callable[[Path, List[Label]], None], params: Params):
-    dataloader = dataset.make_loader(params.num_workers)
-
+def _eval_images(dataset: ChippedDataset, model: torch.nn.Module, device: torch.device, params: Params):
     pbar = tqdm(total=dataset.num_images)
+    dataloader = dataset.make_loader(params.num_workers)
     for batch, paths in dataloader:
         batch = batch.to(device)
         pred_batch = _eval_batch(batch, model, params)
         for pred, path in zip(pred_batch, paths):
             labels = [Label(int(cls), Rect.from_ltrb(l, t, r, b)) for (l, t, r, b, conf, cls) in pred]
-            result_writer(path, labels)
+            yield (path, labels)
         pbar.update(len(paths))
 
 
@@ -67,26 +72,31 @@ def _load_model(weight_paths: List[Path], device, trace=False) -> torch.nn.Modul
 
 
 def main(
-    dataset_yaml_path: Path = typer.Argument(..., exists=True),
+    dataset_path: Path = typer.Argument(..., exists=True),
     weight_paths: List[Path] = typer.Option(..., '-w', '--weights', exists=True),
-    predictions_path: Path = typer.Option(..., '-o', '--output', dir_okay=False),
+    predictions_path: Optional[Path] = typer.Option(None, '-o', '--output', dir_okay=False),
     device_str: str = typer.Option('', '-d', '--device'),
     conf_threshold: float = typer.Option(0.25, '--conf'),
     iou_threshold: float = typer.Option(0.45, '--iou'),
     batch_size: int = typer.Option(32, '--batch-size', '--bs'),
     num_workers: int = typer.Option(24, '--num-workers', '--nw'),
+    split: str = typer.Option('test', '--split'),
     overwrite: bool = typer.Option(False),
     image_prefix: str = typer.Option('Norway', '--prefix'),
 ):
-    dataset_yaml_dict = yaml.safe_load(dataset_yaml_path.read_text())
-
-    if not 'test' in dataset_yaml_dict:
-        typer.echo('No test split in dataset YAML file')
-        raise typer.Exit(1)
-
-    data_path = Path(dataset_yaml_dict['test'])
+    if dataset_path.is_file():
+        dataset_yaml_dict = yaml.safe_load(dataset_path.read_text())
+        if not split in dataset_yaml_dict:
+            typer.echo(f'No "{split}" split in dataset YAML file')
+            raise typer.Exit(1)
+        data_path = Path(dataset_yaml_dict[split])
+        default_predictions_path = dataset_path.name + '.txt'
+    else:
+        data_path = dataset_path
+        default_predictions_path = '_'.join(dataset_path.parts[-4:-2]) + '.txt'
+    
     if not data_path.exists():
-        typer.echo(f'No test set found in {dataset_yaml_path}')
+        typer.echo(f"{dataset_path} doesn't exist.")
         raise typer.Exit(1)
 
     collected_weight_paths: List[Path] = []
@@ -101,7 +111,7 @@ def main(
         raise typer.Exit(1)
 
     if not predictions_path:
-        predictions_path = Path('output/predictions.txt')
+        predictions_path = Path('output') / default_predictions_path
 
     if predictions_path.exists():
         if overwrite:
@@ -117,14 +127,13 @@ def main(
     dataset = ChippedDataset(data_path, image_prefix, params.batch_size)
     model = _load_model(collected_weight_paths, device)
     
-    predictions_path.mkdir(parents=True, exist_ok=True)
+    predictions_path.parent.mkdir(parents=True, exist_ok=True)
     with predictions_path.open('w') as f:
-        def result_writer(image_path: Path, labels: List[Label]):
+        predictions = _eval_images(dataset, model, device, params)
+        for image_path, labels in predictions:
             assert len(labels) <= 5
-            prediction_str = ' '.join(map(str, labels))
-            f.write(f'{image_path.stem} {prediction_str}\n')
-
-        _eval_images(dataset, model, device, result_writer, params)
+            prediction_str = ' '.join(map(_format_label, labels))
+            f.write(f'{image_path.name},{prediction_str}\n')
 
 
 if __name__ == "__main__":
