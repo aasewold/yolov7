@@ -419,7 +419,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         nb = bi[-1] + 1  # number of batches
         self.batch = bi  # batch index of image
         self.n = n
-        self.indices = range(n)
+        self.indices = list(range(n))
 
         # Rectangular Training
         if self.rect:

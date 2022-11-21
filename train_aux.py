@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import random
+import sys
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -320,6 +321,15 @@ def train(hyp, opt, device, tb_writer=None):
                 dist.broadcast(indices, 0)
                 if rank != 0:
                     dataset.indices = indices.cpu().numpy()
+        
+        if opt.shuffle:
+            random.shuffle(dataset.indices)
+            # Broadcast if DDP
+            if rank != -1:
+                indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
+                dist.broadcast(indices, 0)
+                if rank != 0:
+                    dataset.indices = indices.cpu().numpy()
 
         # Update mosaic border
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
@@ -539,6 +549,7 @@ if __name__ == '__main__':
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache-images', action='store_true', help='cache images for faster training')
     parser.add_argument('--image-weights', action='store_true', help='use weighted image selection for training')
+    parser.add_argument('--shuffle', action='store_true', help='shuffle dataset at every epoch')
     parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
@@ -567,6 +578,10 @@ if __name__ == '__main__':
     #if opt.global_rank in [-1, 0]:
     #    check_git_status()
     #    check_requirements()
+
+    if opt.shuffle and opt.image_weights:
+        print('--shuffle and --image-weights are mutually exclusive.', file=sys.stderr)
+        sys.exit(1)
 
     # Resume
     wandb_run = check_wandb_resume(opt)
