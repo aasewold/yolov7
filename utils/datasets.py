@@ -63,7 +63,7 @@ def exif_size(img):
 
 
 def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
-                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix=''):
+                      rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='', max_negative=1.0):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
     with torch_distributed_zero_first(rank):
         dataset = LoadImagesAndLabels(path, imgsz, batch_size,
@@ -75,7 +75,9 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                       stride=int(stride),
                                       pad=pad,
                                       image_weights=image_weights,
-                                      prefix=prefix)
+                                      prefix=prefix,
+                                      max_negative=max_negative,
+                                      )
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
@@ -352,7 +354,7 @@ def img2label_paths(img_paths):
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
-                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix=''):
+                 cache_images=False, single_cls=False, stride=32, pad=0.0, prefix='', max_negative=1.0):
         self.img_size = img_size
         self.augment = augment
         self.hyp = hyp
@@ -394,6 +396,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             #    cache, exists = self.cache_labels(cache_path, prefix), False  # re-cache
         else:
             cache, exists = self.cache_labels(cache_path, prefix), False  # cache
+        
+        cache = self._filter_negative_samples(cache, max_negative)
 
         # Display cache
         nf, nm, ne, nc, n = cache.pop('results')  # found, missing, empty, corrupted, total
@@ -466,6 +470,44 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                     gb += self.imgs[i].nbytes
                 pbar.desc = f'{prefix}Caching images ({gb / 1E9:.1f}GB)'
             pbar.close()
+        
+    def _filter_negative_samples(self, cache: dict, max_negative: float):
+        """
+        Filter out negative samples with a probability of max_negative
+        """
+        cache = cache.copy()
+        cache_results = cache.pop('results')
+        cache_hash = cache.pop('hash')
+        cache_version = cache.pop('version')
+
+        priori_num_negative = sum(len(x[0]) == 0 for x in cache.values())
+
+        if max_negative == 1:
+            print('No negative sample filtering.')
+            new_cache = cache
+        else:
+            print(f'Filtering negative samples with max fraction {max_negative}.')
+            new_cache = {}
+            num_negative_kept = 0
+            for k, v in cache.items():
+                labels = v[0]
+                if len(labels) > 0:
+                    new_cache[k] = v
+                else:
+                    if num_negative_kept / (len(new_cache) + 1) < max_negative:
+                        new_cache[k] = v
+                        num_negative_kept += 1
+
+        posteriori_num_negative = sum(len(x[0]) == 0 for x in new_cache.values())
+        num_negative_discarded = priori_num_negative - posteriori_num_negative
+        print(f'Discarded {num_negative_discarded} negative samples out of {priori_num_negative} total negative samples.')
+        print(f'Previous negative fraction: {priori_num_negative / len(cache):.3f}')
+        print(f'New negative fraction: {posteriori_num_negative / len(new_cache):.3f}')
+
+        new_cache['results'] = cache_results
+        new_cache['hash'] = cache_hash
+        new_cache['version'] = cache_version
+        return new_cache
 
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
         # Cache dataset labels, check images and read shapes
