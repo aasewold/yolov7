@@ -427,27 +427,47 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Rectangular Training
         if self.rect:
-            # Sort by aspect ratio
-            s = self.shapes  # wh
-            ar = s[:, 1] / s[:, 0]  # aspect ratio
-            irect = ar.argsort()
-            self.img_files = [self.img_files[i] for i in irect]
-            self.label_files = [self.label_files[i] for i in irect]
-            self.labels = [self.labels[i] for i in irect]
-            self.shapes = s[irect]  # wh
-            ar = ar[irect]
+            if img_size:
+                # Sort by aspect ratio
+                s = self.shapes  # wh
+                ar = s[:, 1] / s[:, 0]  # aspect ratio
+                irect = ar.argsort()
+                self.img_files = [self.img_files[i] for i in irect]
+                self.label_files = [self.label_files[i] for i in irect]
+                self.labels = [self.labels[i] for i in irect]
+                self.shapes = s[irect]  # wh
+                ar = ar[irect]
 
-            # Set training image shapes
-            shapes = [[1, 1]] * nb
-            for i in range(nb):
-                ari = ar[bi == i]
-                mini, maxi = ari.min(), ari.max()
-                if maxi < 1:
-                    shapes[i] = [maxi, 1]
-                elif mini > 1:
-                    shapes[i] = [1, 1 / mini]
+                # Set training image shapes
+                shapes = [[1, 1]] * nb
+                for i in range(nb):
+                    ari = ar[bi == i]
+                    mini, maxi = ari.min(), ari.max()
+                    if maxi < 1:
+                        shapes[i] = [maxi, 1]
+                    elif mini > 1:
+                        shapes[i] = [1, 1 / mini]
 
-            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
+                self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
+            else:
+                # Argsort self.shapes
+                sorted_indices = sorted(range(len(self.shapes)), key=lambda i: tuple(self.shapes[i]))
+
+                self.img_files = [self.img_files[i] for i in sorted_indices]
+                self.label_files = [self.label_files[i] for i in sorted_indices]
+                self.labels = [self.labels[i] for i in sorted_indices]
+                self.shapes = self.shapes[sorted_indices]
+
+                shapes = []
+                for i in range(nb):
+                    batch_shapes = self.shapes[bi == i]
+                    max_w = batch_shapes[:, 0].max()
+                    max_h = batch_shapes[:, 1].max()
+                    padded_w = np.ceil(max_w / stride + pad).astype(np.int) * stride
+                    padded_h = np.ceil(max_h / stride + pad).astype(np.int) * stride
+                    shapes.append([padded_w, padded_h])
+                
+                self.batch_shapes = np.array(shapes)
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
@@ -601,8 +621,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             img, (h0, w0), (h, w) = load_image(self, index)
 
             # Letterbox
-            shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
-            img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
+            shape_wh = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            img, ratio, pad = letterbox(img, shape_wh, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
             labels = self.labels[index].copy()
@@ -713,10 +733,11 @@ def load_image(self, index):
         img = cv2.imread(path)  # BGR
         assert img is not None, 'Image Not Found ' + path
         h0, w0 = img.shape[:2]  # orig hw
-        r = self.img_size / max(h0, w0)  # resize image to img_size
-        if r != 1:  # always resize down, only resize up if training with augmentation
-            interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
-            img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
+        if self.img_size:
+            r = self.img_size / max(h0, w0)  # resize image to img_size
+            if r != 1:  # always resize down, only resize up if training with augmentation
+                interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
+                img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
         return img, (h0, w0), img.shape[:2]  # img, hw_original, hw_resized
     else:
         return self.imgs[index], self.img_hw0[index], self.img_hw[index]  # img, hw_original, hw_resized
@@ -886,7 +907,7 @@ def load_samples(self, index):
     # loads images in a 4-mosaic
 
     labels4, segments4 = [], []
-    s = self.img_size
+    s = self.img_size or max(*self.shapes[index])
     yc, xc = [int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border]  # mosaic center x, y
     indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
     for i, index in enumerate(indices):
@@ -1023,33 +1044,33 @@ def replicate(img, labels):
     return img, labels
 
 
-def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
+def letterbox(img, new_shape_wh=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
     # Resize and pad image while meeting stride-multiple constraints
-    shape = img.shape[:2]  # current shape [height, width]
-    if isinstance(new_shape, int):
-        new_shape = (new_shape, new_shape)
+    shape_wh = img.shape[:2][::-1]  # current shape [height, width]
+    if isinstance(new_shape_wh, int):
+        new_shape_wh = (new_shape_wh, new_shape_wh)
 
     # Scale ratio (new / old)
-    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    r = min(new_shape_wh[0] / shape_wh[0], new_shape_wh[1] / shape_wh[1])
     if not scaleup:  # only scale down, do not scale up (for better test mAP)
         r = min(r, 1.0)
 
     # Compute padding
     ratio = r, r  # width, height ratios
-    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    new_unpad_wh = int(round(shape_wh[0] * r)), int(round(shape_wh[1] * r))
+    dw, dh = new_shape_wh[0] - new_unpad_wh[0], new_shape_wh[1] - new_unpad_wh[1]  # wh padding
     if auto:  # minimum rectangle
         dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
     elif scaleFill:  # stretch
         dw, dh = 0.0, 0.0
-        new_unpad = (new_shape[1], new_shape[0])
-        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
+        new_unpad_wh = (new_shape_wh[0], new_shape_wh[1])
+        ratio = new_shape_wh[0] / shape_wh[0], new_shape_wh[1] / shape_wh[1]  # width, height ratios
 
     dw /= 2  # divide padding into 2 sides
     dh /= 2
 
-    if shape[::-1] != new_unpad:  # resize
-        img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+    if shape_wh != new_unpad_wh:  # resize
+        img = cv2.resize(img, new_unpad_wh, interpolation=cv2.INTER_LINEAR)
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
     img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
