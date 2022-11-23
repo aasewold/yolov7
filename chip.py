@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import multiprocessing
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -20,6 +20,7 @@ class Params:
     chip_size: Tuple[int, int]
     chip_stride: Tuple[int, int]
     label_coverage_threshold: float
+    full_chips: bool
 
 
 def _get_labels(chip: tdt17.chip.Chip, labels: List[Label], image_size: Tuple[int, int], params: Params) -> List[str]:
@@ -51,13 +52,13 @@ def _chip_image(
     out_label_base = out_labels / (out_image_base.stem + '.txt')
 
     if in_label.exists():
-        labels = list(map(Label.from_string, in_label.read_text().splitlines()))
+        labels = list(map(Label.from_xywh_string, in_label.read_text().splitlines()))
     else:
         labels = []
 
     image = cv2.imread(str(in_image), cv2.IMREAD_COLOR)
     image_wh = image.shape[1], image.shape[0]
-    chips = tdt17.chip.chip(image, params.chip_size, params.chip_stride)
+    chips = tdt17.chip.chip(image, params.chip_size, params.chip_stride, params.full_chips)
 
     for row, chip_row in enumerate(chips):
         for col, chip in enumerate(chip_row):
@@ -126,24 +127,26 @@ def main(
     stride: Tuple[int, int] = typer.Option((320, 320), '--stride'),
     coverage_threshold: float = typer.Option(0.25, '--threshold'),
     output_path: Optional[Path] = typer.Option(None, '--output'),
-    output_path_suffix: str = typer.Option('_chipped', '--suffix'),
+    output_path_suffix: str = typer.Option('', '--suffix'),
+    no_full_chips: bool = typer.Option(False, '--no-full'),
     num_cpus: int = typer.Option(0, '--cpus'),
     overwrite: bool = typer.Option(False),
+    splits: List[str] = typer.Option(..., '--split'),
 ):
 
     # Parse dataset YAML description (or don't)
 
     if dataset_path.is_file():
-        dataset_yaml_path = dataset_path
         dataset_yaml_dict = yaml.safe_load(dataset_path.read_text())
-        dataset_yaml_paths = {Path(dataset_yaml_dict[split]).parent.parent for split in ['train', 'val', 'test']}
+        dataset_yaml_paths = {Path(dataset_yaml_dict[split]).parent.parent for split in splits}
         if len(dataset_yaml_paths) != 1:
             raise ValueError('All splits must be in the same dataset')
         dataset_path = dataset_yaml_paths.pop()
-        output_yaml_path = dataset_yaml_path.with_name(f'{dataset_yaml_path.stem}_chipped{dataset_yaml_path.suffix}')
     else:
-        dataset_yaml_dict = {}
-        output_yaml_path = dataset_path / 'dataset_chipped.yaml'
+        dataset_yaml_dict = {
+            'nc': 4,
+            'names': ['D00', 'D10', 'D20', 'D40'],
+        }
 
     # Check that stuff exists or doesn't
 
@@ -154,11 +157,13 @@ def main(
         typer.echo('Invalid dataset (missing ./images and ./labels)')
         raise typer.Exit(1)
 
+    if not output_path_suffix:
+        output_path_suffix = f'-chipped-{size[0]}x{size[1]}-{stride[0]}x{stride[1]}-t{coverage_threshold}'
+
     if not output_path:
         output_path = dataset_path.with_name(dataset_path.stem + output_path_suffix)
-    elif output_path_suffix:
-        typer.echo('Cannot specify both --output and --suffix')
-        raise typer.Exit(1)
+
+    output_path = output_path.resolve()
 
     typer.echo(f'Chipping to {output_path}')
 
@@ -169,44 +174,24 @@ def main(
             typer.echo(f'Output path {output_path} already exists. Use --overwrite to overwrite it.')
             raise typer.Exit(1)
 
-    if output_yaml_path.exists():
-        if overwrite:
-            output_yaml_path.unlink()
-        else:
-            typer.echo(f'Output YAML path {output_yaml_path} already exists. Use --overwrite to overwrite it.')
-            raise typer.Exit(1)
-
     if num_cpus == 0:
         num_cpus = multiprocessing.cpu_count()
 
-    # Find the splits
-
-    splits = [
-        split.name
-        for split in (dataset_path / 'images').iterdir()
-        if split.is_dir() and (dataset_path / 'labels' / split.name).is_dir()
-    ]
-
-    typer.echo(f'Found {len(splits)} splits: {", ".join(splits)}')
-
     # Split the splits
 
-    params = Params(num_cpus, size, stride, coverage_threshold)
+    params = Params(num_cpus, size, stride, coverage_threshold, full_chips=not no_full_chips)
 
     for split in splits:
         typer.echo(f'Chipping {split} split')
         _chip_folder(dataset_path, output_path, split, params)
-    
-    # Output some summaries
 
-    _make_yaml_config(output_yaml_path, dataset_yaml_dict, output_path, splits)
+    # Output some information
 
-    with open(output_path / 'chip_config.txt', 'w') as f:
-        f.write(
-            f'size: {size[0]} {size[1]}\n'
-            f'stride: {stride[0]} {stride[1]}\n'
-            f'splits: {", ".join(splits)}\n'
-        )
+    for split in splits:
+        dataset_yaml_dict[split] = str(output_path / 'images' / split)
+    dataset_yaml_dict['chip'] = asdict(params)
+    output_yaml_path = output_path / 'dataset.yaml'
+    output_yaml_path.write_text(yaml.safe_dump(dataset_yaml_dict, sort_keys=False))
 
 
 if __name__ == '__main__':

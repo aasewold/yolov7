@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -31,32 +32,36 @@ class Params:
 def _format_label(label: Label) -> str:
     id = label.id
     l, t, r, b = map(int, label.rect.ltrb)
-    return f'{id} {l} {t} {r} {b}'
+    return f'{id+1} {l} {t} {r} {b}'
 
 
-@torch.inference_mode()
-def _eval_batch(batch: torch.Tensor, model: torch.nn.Module, params: Params) -> List[List[Prediction]]:
+def _eval_batch(batch: torch.Tensor, model: torch.nn.Module, params: Params) -> List[List[Label]]:
     pred_batch, _ = model(batch, augment=False)
     pred_batch = non_max_suppression(pred_batch, conf_thres=params.conf_threshold,
                                      iou_thres=params.iou_threshold, multi_label=True)
 
+    batch_img_hw = batch.shape[-2:]
+    batch_img_rect = Rect(0, 0, batch_img_hw[1], batch_img_hw[0])
+
     # (n, 6) x y x y conf cls
-    out_batch: List[List[Prediction]] = []
+    labels_batch: List[List[Label]] = []
     for pred in pred_batch:
         out = list(map(tuple, pred.cpu().numpy()))
         out.sort(key=lambda x: x[4], reverse=True)
-        out_batch.append(out[:5])
-    return out_batch
+        out = out[:5]
+        labels = [Label(int(cls), Rect.from_ltrb(l, t, r, b).intersection(batch_img_rect)) for (l, t, r, b, conf, cls) in out]
+        labels_batch.append(labels)
+    return labels_batch
 
 
+@torch.inference_mode()
 def _eval_images(dataset: ChippedDataset, model: torch.nn.Module, device: torch.device, params: Params):
     pbar = tqdm(total=dataset.num_images)
     dataloader = dataset.make_loader(params.num_workers)
     for batch, paths in dataloader:
         batch = batch.to(device)
-        pred_batch = _eval_batch(batch, model, params)
-        for pred, path in zip(pred_batch, paths):
-            labels = [Label(int(cls), Rect.from_ltrb(l, t, r, b)) for (l, t, r, b, conf, cls) in pred]
+        labels_batch = _eval_batch(batch, model, params)
+        for path, labels in zip(paths, labels_batch):
             yield (path, labels)
         pbar.update(len(paths))
 
@@ -79,19 +84,19 @@ def main(
     batch_size: int = typer.Option(32, '--batch-size', '--bs'),
     num_workers: int = typer.Option(24, '--num-workers', '--nw'),
     split: str = typer.Option('test', '--split'),
-    overwrite: bool = typer.Option(False),
     image_prefix: str = typer.Option('Norway', '--prefix'),
 ):
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     if dataset_path.is_file():
         dataset_yaml_dict = yaml.safe_load(dataset_path.read_text())
         if not split in dataset_yaml_dict:
             typer.echo(f'No "{split}" split in dataset YAML file')
             raise typer.Exit(1)
         data_path = Path(dataset_yaml_dict[split])
-        default_predictions_path = dataset_path.name + '.txt'
+        default_predictions_path = f'{dataset_path.name}_{timestamp}.txt'
     else:
         data_path = dataset_path
-        default_predictions_path = '_'.join(dataset_path.parts[-4:-2]) + '.txt'
+        default_predictions_path = f'{"_".join(dataset_path.parts[-4:-2])}_{timestamp}.txt'
     
     if not data_path.exists():
         typer.echo(f"{dataset_path} doesn't exist.")
@@ -112,11 +117,8 @@ def main(
         predictions_path = Path('output') / default_predictions_path
 
     if predictions_path.exists():
-        if overwrite:
-            predictions_path.unlink()
-        else:
-            typer.echo(f'Output path {predictions_path} already exists. Use --overwrite to overwrite it.')
-            raise typer.Exit(1)
+        typer.echo(f'Output path {predictions_path} already exists.')
+        raise typer.Exit(1)
 
     device = select_device(device_str)
 
@@ -126,12 +128,17 @@ def main(
     model = _load_model(collected_weight_paths, device)
     
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
-    with predictions_path.open('w') as f:
-        predictions = _eval_images(dataset, model, device, params)
-        for image_path, labels in predictions:
-            assert len(labels) <= 5
-            prediction_str = ' '.join(map(_format_label, labels))
-            f.write(f'{image_path.name},{prediction_str}\n')
+    try:
+        with predictions_path.open('w') as f:
+            predictions = _eval_images(dataset, model, device, params)
+            for image_path, labels in predictions:
+                assert len(labels) <= 5
+                prediction_str = ' '.join(map(_format_label, labels))
+                f.write(f'{image_path.name},{prediction_str}\n')
+    except:
+        if predictions_path.exists():
+            predictions_path.unlink()
+        raise
 
 
 if __name__ == "__main__":
