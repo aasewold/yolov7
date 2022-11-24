@@ -74,7 +74,31 @@ def _load_model(weight_paths: List[Path], device, trace=False) -> torch.nn.Modul
     return model
 
 
-def main(
+def _find_weights(path: Path, allowed_names: List[str]) -> List[Path]:
+    collected_weight_paths: List[Path] = []
+    candidates: List[Path] = []
+
+    path = path.resolve()
+    for entry in path.iterdir():
+        if entry.is_dir():
+            collected_weight_paths.extend(_find_weights(entry, allowed_names))
+        elif entry.suffix == '.pt':
+            candidates.append(entry)
+
+    for name in allowed_names:
+        chosen_candidate = next((c for c in candidates if c.name == name), None)
+        if chosen_candidate:
+            collected_weight_paths.append(chosen_candidate)
+            break
+    else:
+        if candidates:
+            print(f'WARNING: no allowed name found for {path.name}, adding all')
+            collected_weight_paths.extend(candidates)
+
+    return collected_weight_paths
+
+
+def main(   
     dataset_path: Path = typer.Argument(..., exists=True),
     weight_paths: List[Path] = typer.Option(..., '-w', '--weights', exists=True),
     predictions_path: Optional[Path] = typer.Option(None, '-o', '--output', dir_okay=False),
@@ -103,15 +127,18 @@ def main(
         raise typer.Exit(1)
 
     collected_weight_paths: List[Path] = []
-    for path in weight_paths:
-        if path.is_dir():
-            collected_weight_paths.extend(path.glob('*.pt'))
+    for weight_path in weight_paths:
+        if weight_path.is_file():
+            collected_weight_paths.append(weight_path)
         else:
-            collected_weight_paths.append(path)
+            collected_weight_paths.extend(_find_weights(weight_path, ['last_stripped.pt', 'last.pt', 'best_stripped.pt', 'best.pt']))
 
     if not collected_weight_paths:
         typer.echo('No weight files found')
         raise typer.Exit(1)
+    
+    collected_weight_list = '\n'.join([str(path) for path in collected_weight_paths])
+    print(f"Using weights:\n{collected_weight_list}")
 
     if not predictions_path:
         predictions_path = Path('output') / default_predictions_path
