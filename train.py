@@ -246,7 +246,8 @@ def train(hyp, opt, device, tb_writer=None):
     dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
                                             hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
                                             world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '), max_negative=opt.max_negative)
+                                            image_weights=opt.image_weights, shuffle=opt.shuffle,
+                                            quad=opt.quad, prefix=colorstr('train: '), max_negative=opt.max_negative)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
     nb = len(dataloader)  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
@@ -334,13 +335,18 @@ def train(hyp, opt, device, tb_writer=None):
                         dataset.indices = indices.cpu().numpy()
             
             if opt.shuffle:
+                print('Shuffling dataset indices')
                 random.shuffle(dataset.indices)
                 # Broadcast if DDP
                 if rank != -1:
                     indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
                     dist.broadcast(indices, 0)
-                    if rank != 0:
+                    if rank == 0:
+                        print('Broadcast dataset indices')
+                    else:
                         dataset.indices = indices.cpu().numpy()
+                        print('Received dataset indices')
+                    
 
             # Update mosaic border
             # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
@@ -352,7 +358,7 @@ def train(hyp, opt, device, tb_writer=None):
             pbar = enumerate(dataloader)
             logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
             if rank in [-1, 0]:
-                pbar = tqdm(pbar, total=nb)  # progress bar
+                pbar = tqdm(pbar, total=nb, dynamic_ncols=True)  # progress bar
             optimizer.zero_grad()
             for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
                 ni = i + nb * epoch  # number integrated batches (since train start)
@@ -444,9 +450,8 @@ def train(hyp, opt, device, tb_writer=None):
                                                     is_coco=is_coco,
                                                     v5_metric=opt.v5_metric)
                     if plots and plot_epoch:
-                        plot_results(save_dir=save_dir)  # save as results.png
                         if wandb_logger.wandb:
-                            files = ['results.png', 'confusion_matrix.png', *[f'{x}_curve.png' for x in ('F1', 'PR', 'P', 'R')]]
+                            files = ['confusion_matrix.png', *[f'{x}_curve.png' for x in ('F1', 'PR', 'P', 'R')]]
                             wandb_logger.log({"Results": [wandb_logger.wandb.Image(str(save_dir / f), caption=f) for f in files
                                                         if (save_dir / f).exists()]})
 
