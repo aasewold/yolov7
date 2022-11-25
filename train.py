@@ -300,15 +300,13 @@ def train(hyp, opt, device, tb_writer=None):
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = amp.GradScaler(enabled=cuda)
 
+    compute_loss_test = ComputeLoss(model)
     if hyp.get('loss_aux', 0) == 1:
-        loss_instance = ComputeLossAuxOTA(model)
-        compute_loss = lambda pred, targets, imgs: loss_instance(pred, targets.to(device), imgs)
+        compute_loss_train = ComputeLossAuxOTA(model)
     elif 'loss_ota' not in hyp or hyp['loss_ota'] == 1:
-        loss_instance = ComputeLossOTA(model)  # init loss class
-        compute_loss = lambda pred, targets, imgs: loss_instance(pred, targets.to(device), imgs)
+        compute_loss_train = ComputeLossOTA(model)
     else:
-        loss_instance = ComputeLoss(model)  # init loss class
-        compute_loss = lambda pred, targets, imgs=None: loss_instance(pred, targets.to(device))
+        compute_loss_train = lambda pred, targets, imgs: compute_loss_test(pred, targets)
     
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
@@ -386,7 +384,7 @@ def train(hyp, opt, device, tb_writer=None):
                 # Forward
                 with amp.autocast(enabled=cuda):
                     pred = model(imgs)  # forward
-                    loss, loss_items = compute_loss(pred, targets.to(device), imgs)  # loss scaled by batch_size
+                    loss, loss_items = compute_loss_train(pred, targets.to(device), imgs)  # loss scaled by batch_size
                     if rank != -1:
                         loss *= opt.world_size  # gradient averaged between devices in DDP mode
                     if opt.quad:
@@ -446,7 +444,7 @@ def train(hyp, opt, device, tb_writer=None):
                                                     verbose=nc < 50 and final_epoch,
                                                     plots=plots and (final_epoch or plot_epoch),
                                                     wandb_logger=wandb_logger,
-                                                    compute_loss=compute_loss,
+                                                    compute_loss=compute_loss_test,
                                                     is_coco=is_coco,
                                                     v5_metric=opt.v5_metric)
                     if plots and plot_epoch:
